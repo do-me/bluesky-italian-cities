@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jetstream Stream - Italy</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://unpkg.com/maplibre-gl@3.1.0/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@3.1.0/dist/maplibre-gl.js"></script>
+    <!-- fflate is no longer needed here, loaded in the worker -->
+
+    <style>
+        #map {
+            position: relative;
+            height: 800px;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100">
+    <div class="container mx-auto p-4">
+        <h1 class="text-2xl font-bold mb-4">Bluesky Jetstream Post Stream - Italian Cities</h1>
+        <h2 class="text-lg font-bold mb-2">Mapping Bluesky posts mentioning Italian cities with plenty of false positives </h2>
+
+        <div id="map"></div>
+
+        <div  class="mt-4">
+            <div id="counter">Locations Added: 0</div>
+            <div id="posts-processed">Posts processed: 0</div>
+        </div>
+        <div class="mt-4">
+            <label for="rateLimit" class="block text-gray-700 text-sm font-bold mb-2">Rate Limit (Posts per Second):</label>
+            <input type="number" id="rateLimit" class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" placeholder="No Limit" min="1" max="1000000000000000">
+        </div>
+        <table class="table-auto w-full">
+            <thead>
+                <tr>
+                    <th class="px-4 py-2">Post Caption</th>
+                    <th class="px-4 py-2">City Name</th>
+                    <th class="px-4 py-2">Lat</th>
+                    <th class="px-4 py-2">Lon</th>
+                    <th class="px-4 py-2">URL</th>
+                </tr>
+            </thead>
+            <tbody id="postTableBody">
+            </tbody>
+        </table>
+
+        <div id="paginationControls" class="mt-4 flex justify-center space-x-2">
+            <button id="prevPage" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded disabled:opacity-50">Previous</button>
+            <span id="paginationInfo"></span>
+            <button id="nextPage" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded disabled:opacity-50">Next</button>
+        </div>
+
+    </div>
+
+    <script>
+        const JETSTREAMS = [
+            "wss://jetstream1.us-east.bsky.network",
+            "wss://jetstream2.us-east.bsky.network",
+            "wss://jetstream1.us-west.bsky.network",
+            "wss://jetstream2.us-west.bsky.network",
+        ];
+
+        let activeConnection = null;
+        let reconnectTimer = null;
+        let currentJetstreamIndex = 0;
+
+        let locations = []; // Will be populated from IT.json.gz
+
+        // Pagination variables
+        const rowsPerPage = 10;
+        let currentPage = 1;
+        let tableData = []; // Store all table rows
+
+        // Initialize the worker
+        const worker = new Worker('worker.js');
+
+        // Set to track which locations already have a marker
+        const markedLocations = new Set();
+
+        const map = new maplibregl.Map({
+            style: 'https://tiles.openfreemap.org/styles/liberty',
+            center: [12.5674, 41.8719], // Italy's coordinates
+            zoom: 5,
+            container: 'map',
+        });
+
+
+        // Counter div to display the location count
+        const counterDiv = document.getElementById('counter');
+        const postsProcessedCounter = document.getElementById('posts-processed'); // Get the posts processed counter element
+        let locationCount = 0; // Initial location count
+        let totalPostsProcessed = 0; // Track the total number of posts processed
+
+        // Array to keep track of all map markers
+        const mapMarkers = [];
+
+        // Function to load the Italian locations from the gzipped JSON file
+        async function loadItalianLocations() {
+            try {
+                const response = await fetch('IT.json.gz');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const compressedData = await response.arrayBuffer(); // Get the data as an ArrayBuffer
+
+                // Send the compressed data to the worker
+                worker.postMessage({ type: 'loadLocations', compressedData: compressedData }, [compressedData]); // Transfer the buffer
+
+            } catch (error) {
+                console.error('Error loading Italian locations:', error);
+            }
+        }
+
+        // Listen for messages from the worker
+        worker.addEventListener('message', (event) => {
+            const data = event.data;
+
+            switch (data.type) {
+                case 'locationsLoaded':
+                    console.log('Locations loaded successfully in worker!');
+                    // Now you can start processing posts
+                    break;
+                case 'postProcessed':
+                    const { location, record, matchedCity, postsProcessed } = data;
+                    if (location) {
+                        processLocation(location, record, matchedCity);
+                    }
+                    totalPostsProcessed += postsProcessed; // Increment total processed count
+                    // Check if the postsProcessedCounter element still exists
+                    if (postsProcessedCounter) {
+                        postsProcessedCounter.innerText = `Posts processed: ${totalPostsProcessed}`; // Update the counter element
+                    } else {
+                        console.warn('postsProcessedCounter element is missing!');
+                    }
+                    break;
+                case 'error':
+                    console.error('Worker error:', data.message);
+                    break;
+            }
+        });
+
+        function processLocation(location, record, matchedCity) {
+            const text = record.text;
+
+            if (!location?.name || !location?.lat || !location?.lon) {
+                return; // Skip if location data is invalid
+            }
+
+            if (!markedLocations.has(location.name)) { //Use optional chaining
+
+                // Define the image URL
+                const imageUrl = "https://cdn.glitch.global/2ad6225a-4d62-40a7-ac59-4831b738c692/Screenshot_2024-11-22_9.25.08_AM-removebg-preview.png?v=1732267592241";
+
+                // Create the marker with the custom image URL and new popup content
+                const marker = new maplibregl.Marker({
+                    element: createCustomMarker(imageUrl)
+                })
+                    .setLngLat([location.lon, location.lat])
+                    .setPopup(new maplibregl.Popup().setText(`Post: "${text}" City: ${matchedCity}`))
+                    .addTo(map);
+
+                // Store marker for later removal
+                mapMarkers.push(marker);
+
+                // Function to create the custom marker element with the image URL
+                function createCustomMarker(imageUrl) {
+                    const el = document.createElement('div');
+                    el.style.backgroundImage = `url(${imageUrl})`;
+                    el.style.backgroundSize = 'contain';
+                    el.style.width = '33px';  // Adjust the width of the marker as needed
+                    el.style.height = '29px';  // Adjust the height of the marker as needed
+                    el.style.cursor = 'pointer';  // Make the marker clickable
+                    return el;
+                }
+
+                // Store marker for later removal
+                mapMarkers.push(marker);
+
+                // Mark this location as having been processed
+                markedLocations.add(location.name);
+
+                // Update the location count
+                locationCount++;
+                counterDiv.innerText = `Locations Added: ${locationCount}`;
+
+            }
+            // Add to table only if valid location is found
+            let postUrl = 'N/A'; // Default value
+            if (record.author && record.author.handle) {
+                postUrl = `https://bsky.app/profile/${record.author.handle}/post/${record.uri.split('//')[1]}`;
+            }
+
+
+            // Store the table data for pagination
+            tableData.push({
+                postCaption: text,
+                cityName: location.name,
+                lat: location.lat,
+                lon: location.lon,
+                url: postUrl
+            });
+
+            // Render the table with pagination
+            renderTable();
+
+        }
+
+        function addPostToTable(postCaption, cityName, lat, lon, url) {
+            const tableBody = document.getElementById('postTableBody');
+            const row = tableBody.insertRow();
+
+            const captionCell = row.insertCell();
+            captionCell.className = 'border px-4 py-2 text-left break-words'; // text-left and break-words
+            captionCell.textContent = postCaption;
+
+            const cityCell = row.insertCell();
+            cityCell.className = 'border px-4 py-2 text-left'; // text-left
+            cityCell.textContent = cityName;
+
+            const latCell = row.insertCell();
+            latCell.className = 'border px-4 py-2 text-right'; // text-right
+            latCell.textContent = lat;
+
+            const lonCell = row.insertCell();
+            lonCell.className = 'border px-4 py-2 text-right'; // text-right
+            lonCell.textContent = lon;
+
+            const urlCell = row.insertCell();
+            urlCell.className = 'border px-4 py-2 text-left'; // text-left
+            const link = document.createElement('a');
+            link.href = url;
+            link.textContent = 'View Post';
+            link.target = '_blank'; // Open in a new tab
+            urlCell.appendChild(link);
+        }
+
+        function renderTable() {
+            const tableBody = document.getElementById('postTableBody');
+            tableBody.innerHTML = ''; // Clear the existing table
+
+            const startIndex = (currentPage - 1) * rowsPerPage;
+            const endIndex = startIndex + rowsPerPage;
+            const pageData = tableData.slice(startIndex, endIndex);
+
+            pageData.forEach(data => {
+                addPostToTable(data.postCaption, data.cityName, data.lat, data.lon, data.url);
+            });
+
+            updatePaginationButtons();
+        }
+
+        function updatePaginationButtons() {
+            const prevPageButton = document.getElementById('prevPage');
+            const nextPageButton = document.getElementById('nextPage');
+            const paginationInfo = document.getElementById('paginationInfo');
+
+            const startIndex = (currentPage - 1) * rowsPerPage + 1;
+            const endIndex = Math.min(currentPage * rowsPerPage, tableData.length);
+            const totalEntries = tableData.length;
+
+            paginationInfo.textContent = `${startIndex}-${endIndex} of ${totalEntries}`;
+
+            prevPageButton.disabled = currentPage === 1;
+            nextPageButton.disabled = currentPage * rowsPerPage >= tableData.length;
+        }
+
+        function goToPreviousPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                renderTable();
+            }
+        }
+
+        function goToNextPage() {
+            if (currentPage * rowsPerPage < tableData.length) {
+                currentPage++;
+                renderTable();
+            }
+        }
+
+        // Add event listeners to the pagination buttons
+        document.getElementById('prevPage').addEventListener('click', goToPreviousPage);
+        document.getElementById('nextPage').addEventListener('click', goToNextPage);
+
+        // Function to set the rate limit in the worker
+        function setRateLimit(rate) {
+            worker.postMessage({ type: 'setRateLimit', rateLimit: rate });
+        }
+
+        // Connect to Jetstream
+        function connectToJetstream() {
+            if (activeConnection) {
+                activeConnection.close();
+            }
+
+            // Rotate through available Jetstreams
+            const wsUrl = JETSTREAMS[currentJetstreamIndex];
+            currentJetstreamIndex = (currentJetstreamIndex + 1) % JETSTREAMS.length;
+
+            console.log(`Connecting to Jetstream: ${wsUrl}`);
+            activeConnection = new WebSocket(
+                `${wsUrl}/subscribe?wantedCollections=app.bsky.feed.post`
+            );
+
+            activeConnection.onopen = () => {
+                console.log(`Connected to ${wsUrl}`);
+                clearTimeout(reconnectTimer);
+            };
+
+            activeConnection.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.commit?.record?.text) {
+                    // Send the post to the worker to add to the queue
+                    worker.postMessage({ type: 'addPostToQueue', text: data.commit.record.text, record: data.commit.record });
+                }
+            };
+
+            activeConnection.onerror = (error) => {
+                console.error("WebSocket error:", error);
+                reconnect();
+            };
+
+            activeConnection.onclose = () => {
+                console.warn(`Connection to ${wsUrl} closed. Reconnecting...`);
+                reconnect();
+            };
+        }
+
+        // Reconnect on failure
+        function reconnect() {
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(connectToJetstream, 5000); // Retry after 5 seconds
+        }
+
+        // Add event listener for the rate limit input
+        document.getElementById('rateLimit').addEventListener('change', (event) => {
+            const rate = event.target.value ? parseInt(event.target.value, 10) : null;
+            setRateLimit(rate); // Update the rate limit in the worker
+        });
+
+        // Call the function to load Italian locations
+        loadItalianLocations();
+
+        // Start connection
+        connectToJetstream();
+    </script>
+</body>
+
+</html>
