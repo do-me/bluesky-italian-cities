@@ -7,7 +7,7 @@ Geonames provide a list of all Italian cities that we use here.
 ## Result 
 This map below, full of false positives like `Re` from e.g. `you're` or `Pero` from Italian or Spanish `pero` and many more. Sometimes you're lucky though and you actually get a match like Palermo in this run. 
 
-![Mapping Italian Cities](italian_city_mapper.png)
+![bluesky-italian-cities](https://github.com/user-attachments/assets/0f4d9d8a-bb36-423d-8170-200767f14c3b)
 
 ## Conclusion
 Simple lexical matching is definitely not sufficient. 
